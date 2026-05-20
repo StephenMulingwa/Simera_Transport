@@ -57,6 +57,8 @@ export async function POST(req: Request) {
         name: user.full_name,
         role: user.role,
       },
+      /** Same JWT as Set-Cookie — use as Bearer on the next fetch until the cookie commits */
+      sessionToken: token,
     });
   } catch (e) {
     console.error(e);

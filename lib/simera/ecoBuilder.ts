@@ -1,5 +1,5 @@
 import type { ReportRow } from "@/lib/wialon/report";
-import { extractRegistration } from "./parsers";
+import { extractRegistration, parseDurationSec } from "./parsers";
 
 /** Columns we try to surface for each violation row */
 const WANT_COLS = [
@@ -9,6 +9,7 @@ const WANT_COLS = [
   "Initial location",
   "End",
   "Final location",
+  "Speed",
   "Avg. speed",
   "Max. speed",
   "Duration",
@@ -16,31 +17,6 @@ const WANT_COLS = [
   "Count",
   "Driver",
 ] as const;
-
-/** "10.05.2026 03:39:48" → Date | null */
-function parseEcoDate(s: string): Date | null {
-  const m = s.match(
-    /^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/,
-  );
-  if (!m) return null;
-  const [, dd, mm, yyyy, hh, mi, ss] = m;
-  const d = new Date(
-    Number(yyyy),
-    Number(mm) - 1,
-    Number(dd),
-    Number(hh),
-    Number(mi),
-    Number(ss),
-  );
-  return Number.isFinite(d.getTime()) ? d : null;
-}
-
-/** "0:01:23" → seconds */
-function parseDurationSec(s: string): number | null {
-  const m = s.match(/^(\d+):(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
-}
 
 /** "0.00 km" → number */
 function parseKm(s: string): number | null {
@@ -54,13 +30,13 @@ function lc(s: string): string {
 
 /** Returns the original column name in `row` that case-insensitively
  *  equals `target`, or null. */
-function colKey(row: ReportRow, target: string): string | null {
+export function colKey(row: ReportRow, target: string): string | null {
   const t = lc(target);
   for (const k of Object.keys(row)) if (lc(k) === t) return k;
   return null;
 }
 
-function val(row: ReportRow, ...names: string[]): string {
+export function val(row: ReportRow, ...names: string[]): string {
   for (const n of names) {
     const k = colKey(row, n);
     if (k && row[k] != null) return String(row[k]);

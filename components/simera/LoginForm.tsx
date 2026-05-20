@@ -46,40 +46,71 @@ export function LoginForm({ redirectTo }: Props) {
     map: "wait",
   });
 
-  /** Hit the data endpoints in parallel and stash payloads in sessionStorage so
-   *  the dashboard provider can hydrate instantly. Each task resolves on its
-   *  own; we redirect after all three settle. */
-  const warmupAndCache = async (): Promise<void> => {
-    const tasks: Promise<unknown>[] = [];
+  /** Warm up fleet/driver/map API routes. Uses `sessionToken` from the login JSON body
+   *  as `Authorization: Bearer` because some browsers / HTTPS setups do not
+   *  attach the new `Set-Cookie` on the very next `fetch` (warmup would 401). */
+  const warmupAndCache = async (sessionToken?: string): Promise<void> => {
     const cacheAt = Date.now();
 
-    const make = (key: WarmKey, url: string) =>
-      tasks.push(
-        (async () => {
-          try {
-            const r = await fetch(url, { cache: "no-store" });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const payload = await r.json();
-            try {
-              sessionStorage.setItem(
-                `simera:${key}`,
-                JSON.stringify({ at: cacheAt, payload }),
-              );
-            } catch {
-              /* sessionStorage may be disabled - ignore */
-            }
-            setWarming((s) => ({ ...s, [key]: "ok" }));
-          } catch {
-            setWarming((s) => ({ ...s, [key]: "err" }));
-          }
-        })(),
-      );
+    const fetchOpts = (): RequestInit => ({
+      cache: "no-store",
+      credentials: "include",
+      headers: sessionToken
+        ? { Authorization: `Bearer ${sessionToken}` }
+        : undefined,
+    });
 
-    make("fleet", "/api/wialon/fleet");
-    make("driver", "/api/wialon/driver");
-    make("map", "/api/wialon/map");
+    const tryFetch = async (url: string) => {
+      let res = await fetch(url, fetchOpts());
+      if (!res.ok && sessionToken && res.status === 401) {
+        await new Promise((r) => setTimeout(r, 120));
+        res = await fetch(url, fetchOpts());
+      }
+      if (!res.ok && !sessionToken && res.status === 401) {
+        await new Promise((r) => setTimeout(r, 150));
+        res = await fetch(url, {
+          cache: "no-store",
+          credentials: "include",
+        });
+      }
+      return res;
+    };
+
+    const runOne = async (key: WarmKey, url: string) => {
+      const maxAttempts = 3;
+      let lastMsg = "failed";
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const r = await tryFetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const payload = await r.json();
+          try {
+            sessionStorage.setItem(
+              `simera2:${key}`,
+              JSON.stringify({ at: cacheAt, payload }),
+            );
+          } catch {
+            /* sessionStorage may be disabled - ignore */
+          }
+          setWarming((s) => ({ ...s, [key]: "ok" }));
+          return;
+        } catch (e) {
+          lastMsg = e instanceof Error ? e.message : "Error";
+          if (attempt < maxAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 280 * (attempt + 1)));
+          }
+        }
+      }
+      setWarming((s) => ({ ...s, [key]: "err" }));
+      throw new Error(`${WARM_LABELS[key]} (${lastMsg})`);
+    };
+
     for (const href of PREFETCH_ROUTES) router.prefetch(href);
-    await Promise.allSettled(tasks);
+    await Promise.all([
+      runOne("fleet", "/api/wialon/fleet"),
+      runOne("driver", "/api/wialon/driver"),
+      runOne("map", "/api/wialon/map"),
+    ]);
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -93,9 +124,13 @@ export function LoginForm({ redirectTo }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const j = (await r.json()) as { error?: string };
+      const j = (await r.json()) as {
+        error?: string;
+        sessionToken?: string;
+      };
       if (!r.ok) throw new Error(j.error ?? "Login failed");
-      await warmupAndCache();
+      await warmupAndCache(j.sessionToken);
+      setLoading(false);
       router.replace(from);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error");

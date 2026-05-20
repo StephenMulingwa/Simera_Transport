@@ -5,7 +5,7 @@ const PHONES = [
   "+254107600036",
 ] as const;
 
-/** Deterministic phone + display name when Wialon omits driver info */
+/** Deterministic phone + display name when driver info is omitted upstream */
 export function resolveDriverDisplay(input: {
   registration: string;
   driverNameRaw: string | null | undefined;

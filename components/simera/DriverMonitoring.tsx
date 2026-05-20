@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   Clock,
   Gauge,
+  Leaf,
   MessageSquare,
   Phone,
   PhoneOff,
@@ -21,6 +22,11 @@ import {
   type Incident,
 } from "@/lib/contexts/SimeraDataContext";
 import { CARD_LABELS, type DriverCardId } from "@/lib/simera/driverUi";
+import {
+  formatAppTimeOnly,
+  formatTelemetryInstantDisplay,
+} from "@/lib/simera/appTime";
+import { parseReportDateTime } from "@/lib/simera/parsers";
 import { useResolvedIncidents } from "@/hooks/useResolvedIncidents";
 
 type FilterId = DriverCardId | "all";
@@ -66,6 +72,12 @@ const CARDS: CardSpec[] = [
     ring: "ring-violet-300",
   },
   {
+    id: "eco_roll",
+    icon: Leaf,
+    gradient: "from-emerald-500 to-green-700",
+    ring: "ring-emerald-300",
+  },
+  {
     id: "idling",
     icon: Clock,
     gradient: "from-sky-500 to-blue-600",
@@ -85,7 +97,30 @@ export function DriverMonitoring() {
   const [filter, setFilter] = useState<FilterId>("all");
 
   const incidents = driver?.incidents ?? [];
-  const counts = driver?.counts ?? {};
+
+  /** Unresolved incidents only — matches what operators clear in the list */
+  const activeCountByCard = useMemo(() => {
+    const next: Record<DriverCardId, number> = {
+      overspeeding: 0,
+      harsh_braking: 0,
+      harsh_cornering: 0,
+      harsh_acceleration: 0,
+      overrevving: 0,
+      eco_roll: 0,
+      idling: 0,
+      offline: 0,
+    };
+    for (const i of incidents) {
+      if (isResolved(i.id)) continue;
+      if (i.filterCard === "other") continue;
+      next[i.filterCard]++;
+    }
+    return next;
+  }, [incidents, isResolved]);
+
+  const pickFilter = (next: FilterId) => {
+    setFilter((cur) => (cur === next ? "all" : next));
+  };
 
   // Sort: active first by time desc, then resolved by time desc
   const ordered = useMemo(() => {
@@ -100,12 +135,21 @@ export function DriverMonitoring() {
     return activeFirst;
   }, [incidents, isResolved]);
 
+  /** Single source of truth for both the count and the rendered list. */
   const filtered = useMemo(() => {
     if (filter === "all") return ordered;
     return ordered.filter((i) => i.filterCard === filter);
   }, [ordered, filter]);
 
-  const activeCount = ordered.filter((i) => !isResolved(i.id)).length;
+  const filteredActive = useMemo(
+    () => filtered.filter((i) => !isResolved(i.id)),
+    [filtered, isResolved],
+  );
+
+  const activeCount = useMemo(
+    () => ordered.filter((i) => !isResolved(i.id)).length,
+    [ordered, isResolved],
+  );
 
   return (
     <div className="space-y-5">
@@ -140,7 +184,7 @@ export function DriverMonitoring() {
           <span className="flex items-center gap-2 font-semibold text-amber-900">
             <AlertCircle className="h-4 w-4" />
             {CARD_LABELS[filter as DriverCardId]} —{" "}
-            {filtered.filter((i) => !isResolved(i.id)).length} active alerts
+            {filteredActive.length} active alerts
           </span>
           <button
             type="button"
@@ -159,11 +203,12 @@ export function DriverMonitoring() {
         </div>
       )}
 
-      {/* All-types card + 7 violation cards (compact, bold, gradient) */}
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-8">
+      {/* All-types card + violation cards (compact, bold, gradient) */}
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-9">
         <button
           type="button"
           onClick={() => setFilter("all")}
+          aria-pressed={filter === "all"}
           className={`group rounded-lg bg-gradient-to-br from-rose-500 to-red-700 p-3 text-left text-white shadow-sm ring-offset-2 transition hover:brightness-110 ${
             filter === "all" ? "ring-2 ring-yellow-400" : ""
           }`}
@@ -177,14 +222,14 @@ export function DriverMonitoring() {
           <p className="mt-1.5 text-2xl font-extrabold tabular-nums">
             {activeCount}
           </p>
-          <p className="mt-0.5 text-[10px] text-white/85">All alert types</p>
         </button>
 
         {CARDS.map(({ id, icon: Icon, gradient, ring }) => (
           <button
             key={id}
             type="button"
-            onClick={() => setFilter(id)}
+            onClick={() => pickFilter(id)}
+            aria-pressed={filter === id}
             className={`group rounded-lg bg-gradient-to-br ${gradient} p-3 text-left text-white shadow-sm ring-offset-2 transition hover:brightness-110 ${
               filter === id ? `ring-2 ${ring}` : ""
             }`}
@@ -196,10 +241,7 @@ export function DriverMonitoring() {
               <Icon className="h-3.5 w-3.5 opacity-80" />
             </div>
             <p className="mt-1.5 text-2xl font-extrabold tabular-nums">
-              {counts[id] ?? 0}
-            </p>
-            <p className="mt-0.5 text-[10px] text-white/85">
-              {id === "offline" ? "Trucks offline" : "Active alerts"}
+              {activeCountByCard[id] ?? 0}
             </p>
           </button>
         ))}
@@ -210,22 +252,30 @@ export function DriverMonitoring() {
         <header className="flex items-center justify-between gap-2 border-b border-zinc-100 px-4 py-3">
           <h2 className="flex items-center gap-2 text-sm font-bold text-zinc-900">
             <Clock className="h-4 w-4 text-red-600" />
-            Active Alerts ({filtered.filter((i) => !isResolved(i.id)).length})
+            {filter === "all"
+              ? `Active Alerts (${filteredActive.length})`
+              : `${CARD_LABELS[filter as DriverCardId]} (${filteredActive.length})`}
           </h2>
           {lastUpdatedAt && (
             <span className="text-[11px] font-medium text-zinc-600">
-              Updated {new Date(lastUpdatedAt).toLocaleTimeString()}
+              Updated {formatAppTimeOnly(lastUpdatedAt)}
             </span>
           )}
         </header>
-        <div className="max-h-[min(calc(100vh-14rem),1560px)] min-h-[48rem] divide-y divide-zinc-100 overflow-y-auto">
+        {/* `key={filter}` forces a clean re-mount so any stale child state
+            (open comment box, scroll position) is dropped when the operator
+            switches the card filter. */}
+        <div
+          key={filter}
+          className="max-h-[min(calc(100vh-14rem),1560px)] divide-y divide-zinc-100 overflow-y-auto"
+        >
           {!firstLoadDone && filtered.length === 0 ? (
             <p className="px-4 py-8 text-center text-sm text-zinc-500">
               Loading recent incidents…
             </p>
           ) : filtered.length === 0 ? (
             <p className="px-4 py-8 text-center text-sm text-zinc-500">
-              No incidents in the last hour for this filter.
+              No incidents in the last 24 hours for this filter.
             </p>
           ) : (
             filtered.map((inc) => (
@@ -298,6 +348,8 @@ function IncidentCard({
               .join(" → ") || "",
           vehicleRegistration: incident.vehicle,
           commentText: comment.trim(),
+          durationText: incident.durationText,
+          durationSec: incident.durationSec,
         }),
       });
       const j = (await r.json().catch(() => ({}))) as { error?: string };
@@ -313,6 +365,13 @@ function IncidentCard({
   };
 
   const { plate, jn } = shortVehicle(incident.vehicle);
+
+  const relativeSourceIso =
+    incident.violationTimeIso ??
+    (() => {
+      const d = parseReportDateTime(incident.violationTime);
+      return d ? d.toISOString() : null;
+    })();
 
   return (
     <article
@@ -345,12 +404,15 @@ function IncidentCard({
         </a>
         <span className="ml-auto flex items-center gap-2 font-medium text-zinc-700">
           <Clock className="h-3.5 w-3.5" />
-          <span className="font-mono text-[11px]">
-            {incident.violationTime ?? "—"}
+          <span className="font-mono text-[11px] tabular-nums">
+            {formatTelemetryInstantDisplay(
+              incident.violationTimeIso,
+              incident.violationTime,
+            )}
           </span>
-          {incident.violationTimeIso && (
-            <span className="text-[11px]">
-              ({relativeTime(incident.violationTimeIso)})
+          {relativeSourceIso && (
+            <span className="text-[11px] tabular-nums text-zinc-500">
+              ({relativeTime(relativeSourceIso)})
             </span>
           )}
         </span>
@@ -366,42 +428,56 @@ function IncidentCard({
       </div>
 
       {/* Violation summary */}
-      <p className="text-sm font-semibold text-zinc-800">
-        {plate}: {incident.violationLabel}
+      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-zinc-800">
+        <span>
+          {plate}: {incident.violationLabel}
+        </span>
+        {incident.filterCard === "overspeeding" &&
+          (incident.speedDisplay ||
+            (incident.speedKmh != null && Number.isFinite(incident.speedKmh))) && (
+            <span className="inline-flex items-center gap-1 rounded bg-purple-100 px-2 py-0.5 text-[11px] font-bold text-purple-900 ring-1 ring-purple-200">
+              <Gauge className="h-3 w-3 shrink-0" />
+              Speed:{" "}
+              {incident.speedDisplay?.trim() ||
+                `${Math.round(incident.speedKmh!)} km/h`}
+            </span>
+          )}
+        {incident.durationText && (
+          <span className="inline-flex items-center gap-1 rounded bg-zinc-100 px-2 py-0.5 text-[11px] font-bold text-zinc-700">
+            <Clock className="h-3 w-3 text-red-600" />
+            Duration: {incident.durationText}
+          </span>
+        )}
       </p>
 
-      {/* Location */}
+      {/* Location — initial only (no → / End timestamp); show final only if initial is empty */}
       {(incident.locationInitial || incident.locationFinal) && (
         <p className="flex flex-wrap items-start gap-1 text-xs font-medium text-zinc-800">
           <span className="font-bold text-red-600">📍</span>
-          {incident.locationInitialUrl ? (
+          {incident.locationInitial ? (
+            incident.locationInitialUrl ? (
+              <a
+                href={incident.locationInitialUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-blue-800 underline-offset-2 hover:text-blue-950 hover:underline"
+              >
+                {incident.locationInitial}
+              </a>
+            ) : (
+              <span>{incident.locationInitial}</span>
+            )
+          ) : incident.locationFinalUrl ? (
             <a
-              href={incident.locationInitialUrl}
+              href={incident.locationFinalUrl}
               target="_blank"
               rel="noreferrer"
               className="font-medium text-blue-800 underline-offset-2 hover:text-blue-950 hover:underline"
             >
-              {incident.locationInitial}
+              {incident.locationFinal}
             </a>
           ) : (
-            <span>{incident.locationInitial}</span>
-          )}
-          {incident.locationFinal && (
-            <>
-              <span className="text-zinc-400">→</span>
-              {incident.locationFinalUrl ? (
-                <a
-                  href={incident.locationFinalUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-blue-800 underline-offset-2 hover:text-blue-950 hover:underline"
-                >
-                  {incident.locationFinal}
-                </a>
-              ) : (
-                <span>{incident.locationFinal}</span>
-              )}
-            </>
+            <span>{incident.locationFinal}</span>
           )}
         </p>
       )}

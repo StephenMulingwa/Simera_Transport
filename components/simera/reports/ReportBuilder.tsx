@@ -8,7 +8,10 @@ import {
 } from "react";
 import Link from "next/link";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
+  ArrowUpDown,
   Calendar,
   Download,
   FileSpreadsheet,
@@ -18,9 +21,16 @@ import {
   X,
 } from "lucide-react";
 import * as XLSX from "xlsx";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
+import type { RowInput } from "jspdf-autotable";
 import type { ReportRow } from "@/lib/wialon/report";
+import { formatAppDateTime } from "@/lib/simera/appTime";
+import {
+  exportSimeraReportPdf,
+  formatDateRangeLabel,
+} from "@/lib/simera/exportSimeraReportPdf";
+import { parseDurationSec, parseReportDateTime } from "@/lib/simera/parsers";
+
+type SortDir = "asc" | "desc";
 
 export type ReportKind =
   | "fuel"
@@ -52,6 +62,118 @@ type Props = {
 function toLocalInput(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * A cell is considered empty when the report source returned no value. The API
+ * often emits placeholders like "----", "—", "–", "-", or just whitespace
+ * when there is nothing to report for the column.
+ */
+function isEmptyCell(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim();
+  if (s === "") return true;
+  if (/^[-–—]+$/.test(s)) return true;
+  return false;
+}
+
+/**
+ * A row is kept only if at least one non-label column has data. The first
+ * column is typically the grouping / vehicle label and is always present, so
+ * it should not by itself qualify a row as "having data".
+ */
+function rowHasData(row: ReportRow, headers: string[]): boolean {
+  if (headers.length === 0) return false;
+  const valueHeaders = headers.length > 1 ? headers.slice(1) : headers;
+  return valueHeaders.some((h) => !isEmptyCell(row[h]));
+}
+
+function cleanTable(t: ReportTable): ReportTable {
+  const headers = t.rows[0] ? Object.keys(t.rows[0]) : [];
+  return { ...t, rows: t.rows.filter((r) => rowHasData(r, headers)) };
+}
+
+/** Column headers that look like telemetry datetimes (Wialon naive → EAT). */
+function isLikelyReportTimeColumn(name: string): boolean {
+  const c = name.toLowerCase().trim();
+  if (/(max\.?\s*speed|avg\.?\s*speed|^\s*speed\s*$)/i.test(c)) return false;
+  if (
+    /\b(duration|mileage|count|rpm|volume|weight|latitude|longitude|coord|fuel|consumption|distance)\b/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  return /\b(time|timestamp|date|beginning|start|finish|end|logged|created)\b/i.test(
+    c,
+  );
+}
+
+function formatReportCellValue(column: string, value: unknown): string {
+  if (value == null) return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+  if (!isLikelyReportTimeColumn(column)) return raw;
+  const d = parseReportDateTime(raw);
+  if (!d || Number.isNaN(d.getTime())) return raw;
+  return formatAppDateTime(d);
+}
+
+function formatReportRowForExport(row: ReportRow, headers: string[]): ReportRow {
+  const o: ReportRow = {};
+  for (const h of headers) {
+    o[h] = formatReportCellValue(h, row[h]);
+  }
+  return o;
+}
+
+/** First number in a cell (handles "120 km/h", "1,234.5", etc.). */
+function parseCellAsNumber(v: unknown): number | null {
+  if (isEmptyCell(v)) return null;
+  const s = String(v).trim().replace(/,/g, " ");
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const n = parseFloat(m[0]!);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isLikelyDurationColumn(name: string): boolean {
+  const c = name.toLowerCase();
+  return /\b(idl(?:e|ing)|duration)\b/i.test(c);
+}
+
+function compareReportCells(
+  column: string,
+  va: unknown,
+  vb: unknown,
+  dir: SortDir,
+): number {
+  const mul = dir === "asc" ? 1 : -1;
+  const ea = isEmptyCell(va);
+  const eb = isEmptyCell(vb);
+  if (ea && eb) return 0;
+  if (ea) return mul * 1;
+  if (eb) return mul * -1;
+
+  if (isLikelyReportTimeColumn(column)) {
+    const ta = parseReportDateTime(String(va))?.getTime() ?? 0;
+    const tb = parseReportDateTime(String(vb))?.getTime() ?? 0;
+    return mul * (ta - tb);
+  }
+
+  if (isLikelyDurationColumn(column)) {
+    const da = parseDurationSec(String(va));
+    const db = parseDurationSec(String(vb));
+    if (da != null && db != null) return mul * (da - db);
+  }
+
+  const na = parseCellAsNumber(va);
+  const nb = parseCellAsNumber(vb);
+  if (na != null && nb != null) return mul * (na - nb);
+
+  const sa = String(va).trim().toLowerCase();
+  const sb = String(vb).trim().toLowerCase();
+  return mul * sa.localeCompare(sb);
 }
 
 export function ReportBuilder({
@@ -115,7 +237,10 @@ export function ReportBuilder({
       });
       const j = (await r.json()) as ReportResponse & { error?: string };
       if (!r.ok) throw new Error(j.error ?? "Report failed");
-      setPayload(j);
+      setPayload({
+        ...j,
+        tables: (j.tables ?? []).map(cleanTable),
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
     } finally {
@@ -125,8 +250,13 @@ export function ReportBuilder({
 
   const downloadExcel = (table: ReportTable) => {
     const wb = XLSX.utils.book_new();
-    const ws = table.rows.length
-      ? XLSX.utils.json_to_sheet(table.rows)
+    const headers = table.rows[0] ? Object.keys(table.rows[0]) : [];
+    const rows =
+      table.rows.length > 0
+        ? table.rows.map((r) => formatReportRowForExport(r, headers))
+        : [];
+    const ws = rows.length
+      ? XLSX.utils.json_to_sheet(rows)
       : XLSX.utils.aoa_to_sheet([["No data"]]);
     XLSX.utils.book_append_sheet(wb, ws, table.title.slice(0, 31));
     XLSX.writeFile(
@@ -139,94 +269,64 @@ export function ReportBuilder({
     if (!payload) return;
     const wb = XLSX.utils.book_new();
     for (const t of payload.tables) {
-      const ws = t.rows.length
-        ? XLSX.utils.json_to_sheet(t.rows)
+      const headers = t.rows[0] ? Object.keys(t.rows[0]) : [];
+      const rows =
+        t.rows.length > 0
+          ? t.rows.map((r) => formatReportRowForExport(r, headers))
+          : [];
+      const ws = rows.length
+        ? XLSX.utils.json_to_sheet(rows)
         : XLSX.utils.aoa_to_sheet([["No data"]]);
       XLSX.utils.book_append_sheet(wb, ws, t.title.slice(0, 31));
     }
     XLSX.writeFile(wb, `simera_${kind}_${Date.now()}.xlsx`);
   };
 
-  const renderTableToPdf = (
-    doc: jsPDF,
-    table: ReportTable,
-    opts: { firstOnDoc: boolean },
-  ) => {
-    const margin = 36;
-    let y = margin;
-
-    if (!opts.firstOnDoc) {
-      doc.addPage();
-      y = margin;
-    }
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(18);
-    doc.setTextColor(196, 18, 36);
-    doc.text("Simera Transport LTD", margin, y);
-
-    y += 22;
-    doc.setFontSize(13);
-    doc.setTextColor(40, 40, 40);
-    doc.text(table.title, margin, y);
-
-    if (payload) {
-      y += 14;
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      doc.setTextColor(110, 110, 110);
-      doc.text(
-        `Period: ${new Date(payload.interval.from).toLocaleString()}  →  ${new Date(payload.interval.to).toLocaleString()}     ·     Generated: ${new Date(payload.generatedAt).toLocaleString()}     ·     Rows: ${table.rows.length}`,
-        margin,
-        y,
-      );
-    }
-
-    y += 10;
-
-    if (!table.rows.length) {
-      y += 14;
-      doc.setFont("helvetica", "italic");
-      doc.setFontSize(10);
-      doc.setTextColor(110, 110, 110);
-      doc.text("No rows for this selection.", margin, y);
-      return;
-    }
-
-    const headers = Object.keys(table.rows[0]!);
-    const body = table.rows.map((r) => headers.map((h) => String(r[h] ?? "")));
-
-    autoTable(doc, {
-      head: [headers],
-      body,
-      startY: y,
-      styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
-      headStyles: {
-        fillColor: [196, 18, 36],
-        textColor: 255,
-        fontStyle: "bold",
-      },
-      alternateRowStyles: { fillColor: [250, 250, 250] },
-      margin: { left: margin, right: margin },
+  const downloadPdf = async (table: ReportTable, rows: ReportRow[]) => {
+    if (!rows.length || !payload) return;
+    const headers = rows[0] ? Object.keys(rows[0]) : [];
+    if (!headers.length) return;
+    const body = rows.map((r) =>
+      headers.map((h) => formatReportCellValue(h, r[h])),
+    );
+    await exportSimeraReportPdf({
+      title: `${title} — ${table.title}`,
+      subtitle: formatDateRangeLabel(payload.interval.from, payload.interval.to),
+      summary: [
+        { label: "Rows", value: String(rows.length) },
+        { label: "Generated", value: formatAppDateTime(payload.generatedAt) },
+      ],
+      sections: [{ head: [headers] as RowInput[], body }],
+      fileName: `simera_${kind}_${table.title.replace(/\s+/g, "_")}_${Date.now()}.pdf`,
     });
   };
 
-  const downloadPdf = (table: ReportTable) => {
-    if (!table.rows.length) return;
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt" });
-    renderTableToPdf(doc, table, { firstOnDoc: true });
-    doc.save(
-      `simera_${kind}_${table.title.replace(/\s+/g, "_")}_${Date.now()}.pdf`,
-    );
-  };
-
-  const downloadAllPdf = () => {
+  const downloadAllPdf = async () => {
     if (!payload) return;
     const tables = payload.tables.filter((t) => t.rows.length > 0);
     if (tables.length === 0) return;
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt" });
-    tables.forEach((t, i) => renderTableToPdf(doc, t, { firstOnDoc: i === 0 }));
-    doc.save(`simera_${kind}_all_${Date.now()}.pdf`);
+    const sections = tables.map((t) => {
+      const headers = Object.keys(t.rows[0]!);
+      return {
+        heading: t.title,
+        head: [headers] as RowInput[],
+        body: t.rows.map((r) =>
+          headers.map((h) => formatReportCellValue(h, r[h])),
+        ),
+      };
+    });
+    const totalRows = tables.reduce((s, t) => s + t.rows.length, 0);
+    await exportSimeraReportPdf({
+      title: `${title} Report`,
+      subtitle: formatDateRangeLabel(payload.interval.from, payload.interval.to),
+      summary: [
+        { label: "Sheets", value: String(tables.length) },
+        { label: "Total rows", value: String(totalRows) },
+        { label: "Generated", value: formatAppDateTime(payload.generatedAt) },
+      ],
+      sections,
+      fileName: `simera_${kind}_all_${Date.now()}.pdf`,
+    });
   };
 
   return (
@@ -257,8 +357,8 @@ export function ReportBuilder({
           </h2>
           {kind === "eco" && (
             <p className="mb-3 text-xs font-medium text-zinc-600">
-              From / To use your computer&apos;s local timezone. Align the
-              window with Wialon&apos;s report interval (check AM vs PM); if the
+              From / To use your computer&apos;s local timezone. Align the window
+              with the telemetry report interval (check AM vs PM); if the
               interval is wrong, violations fall outside the range.
             </p>
           )}
@@ -393,7 +493,7 @@ export function ReportBuilder({
                 </button>
                 <button
                   type="button"
-                  onClick={downloadAllPdf}
+                  onClick={() => void downloadAllPdf()}
                   className="inline-flex items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-bold text-rose-800 hover:bg-rose-100"
                 >
                   <Download className="h-4 w-4" />
@@ -413,18 +513,20 @@ export function ReportBuilder({
         {payload && (
           <div className="space-y-4">
             <p className="text-xs font-medium text-zinc-700">
-              Generated {new Date(payload.generatedAt).toLocaleString()}
+              Generated {formatAppDateTime(payload.generatedAt)}
               {" · "}
-              Period {new Date(payload.interval.from).toLocaleString()} →{" "}
-              {new Date(payload.interval.to).toLocaleString()}
+              Period {formatAppDateTime(payload.interval.from)} →{" "}
+              {formatAppDateTime(payload.interval.to)}
             </p>
 
             {payload.tables.map((t) => (
               <ResultTable
                 key={t.title}
                 table={t}
-                onExcel={() => downloadExcel(t)}
-                onPdf={() => void downloadPdf(t)}
+                onExcel={(rows) =>
+                  downloadExcel({ ...t, rows })
+                }
+                onPdf={(rows) => void downloadPdf(t, rows)}
               />
             ))}
           </div>
@@ -440,10 +542,51 @@ function ResultTable({
   onPdf,
 }: {
   table: ReportTable;
-  onExcel: () => void;
-  onPdf: () => void;
+  onExcel: (rows: ReportRow[]) => void;
+  onPdf: (rows: ReportRow[]) => void;
 }) {
   const headers = table.rows[0] ? Object.keys(table.rows[0]) : [];
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const activeSortCol =
+    sortKey && headers.includes(sortKey) ? sortKey : headers[0] ?? null;
+
+  const sortedRows = useMemo(() => {
+    if (!activeSortCol || table.rows.length === 0) return table.rows;
+    const copy = [...table.rows];
+    copy.sort((a, b) =>
+      compareReportCells(
+        activeSortCol,
+        a[activeSortCol],
+        b[activeSortCol],
+        sortDir,
+      ),
+    );
+    return copy;
+  }, [table.rows, activeSortCol, sortDir]);
+
+  const toggleSort = (h: string) => {
+    const current = activeSortCol;
+    if (current === h) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      setSortKey(h);
+    } else {
+      setSortKey(h);
+      setSortDir("asc");
+    }
+  };
+
+  const SortIcon = ({ col }: { col: string }) => {
+    if (activeSortCol !== col) {
+      return <ArrowUpDown className="inline h-3.5 w-3.5 opacity-70" />;
+    }
+    return sortDir === "asc" ? (
+      <ArrowUp className="inline h-3.5 w-3.5" />
+    ) : (
+      <ArrowDown className="inline h-3.5 w-3.5" />
+    );
+  };
 
   return (
     <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm">
@@ -453,7 +596,7 @@ function ResultTable({
           <h3 className="font-bold text-zinc-900">
             {table.title}{" "}
             <span className="font-normal text-zinc-600">
-              ({table.rows.length})
+              ({sortedRows.length})
             </span>
           </h3>
         </div>
@@ -461,7 +604,7 @@ function ResultTable({
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={onExcel}
+              onClick={() => onExcel(sortedRows)}
               className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 hover:bg-emerald-100"
             >
               <FileSpreadsheet className="h-3.5 w-3.5" />
@@ -469,7 +612,7 @@ function ResultTable({
             </button>
             <button
               type="button"
-              onClick={onPdf}
+              onClick={() => onPdf(sortedRows)}
               className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700 hover:bg-rose-100"
             >
               <Download className="h-3.5 w-3.5" />
@@ -478,7 +621,7 @@ function ResultTable({
           </div>
         )}
       </header>
-      <div className="max-h-[min(calc(100vh-14rem),1440px)] min-h-[48rem] overflow-auto">
+      <div className="max-h-[min(calc(100vh-14rem),1440px)] overflow-auto">
         {table.rows.length === 0 ? (
           <p className="px-4 py-10 text-center text-sm font-medium text-zinc-700">
             No rows for this selection.
@@ -501,13 +644,20 @@ function ResultTable({
                     key={h}
                     className="whitespace-nowrap px-3 py-2 text-[10px] font-bold uppercase tracking-wider"
                   >
-                    {h}
+                    <button
+                      type="button"
+                      onClick={() => toggleSort(h)}
+                      className="inline-flex items-center gap-1 rounded px-1 py-0.5 font-bold hover:bg-white/10"
+                    >
+                      {h}
+                      <SortIcon col={h} />
+                    </button>
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {table.rows.map((r, i) => (
+              {sortedRows.map((r, i) => (
                 <tr
                   key={i}
                   className={
@@ -524,7 +674,7 @@ function ResultTable({
                       key={h}
                       className="whitespace-nowrap px-3 py-1.5 font-medium text-zinc-800"
                     >
-                      {String(r[h] ?? "")}
+                      {formatReportCellValue(h, r[h])}
                     </td>
                   ))}
                 </tr>

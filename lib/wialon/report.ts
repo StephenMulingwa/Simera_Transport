@@ -20,6 +20,18 @@ function cellToText(cell: unknown): string | number | null {
   return JSON.stringify(cell);
 }
 
+/** Wialon geo cells use x=lon, y=lat; Google Maps expects lat,lng in the q= parameter. */
+export function cellCoordsLatCommaLng(cell: unknown): string {
+  if (cell === null || cell === undefined || typeof cell !== "object") return "";
+  const o = cell as Record<string, unknown>;
+  const x = o.x;
+  const y = o.y;
+  if (typeof x === "number" && typeof y === "number") {
+    return `${y},${x}`;
+  }
+  return "";
+}
+
 function rowsJsonToDataframe(
   headers: string[],
   rowObjects: unknown[],
@@ -34,10 +46,12 @@ function rowsJsonToDataframe(
         : [];
     for (let i = 0; i < n; i++) {
       const key = headers[i] ?? `col_${i}`;
-      rec[key] =
-        cells && i < cells.length
-          ? (cellToText(cells[i]) as string | number | null)
-          : null;
+      const rawCell = cells && i < cells.length ? cells[i] : undefined;
+      rec[key] = cellToText(rawCell) as string | number | null;
+      const cc = cellCoordsLatCommaLng(rawCell);
+      if (cc) {
+        rec[`${key}_coords`] = cc;
+      }
     }
     rows.push(rec);
   }
@@ -180,7 +194,7 @@ export async function withWialonSession<T>(
     token,
   });
   if (apiError(login) || !login.eid) {
-    throw new Error(`Wialon login failed: ${JSON.stringify(login)}`);
+    throw new Error(`Telemetry login failed: ${JSON.stringify(login)}`);
   }
   const sid = login.eid;
   try {

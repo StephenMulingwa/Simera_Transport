@@ -19,7 +19,7 @@ export async function wialonCall<T = WialonJson>(
     next: { revalidate: 0 },
   });
   if (!r.ok) {
-    throw new Error(`Wialon HTTP ${r.status}`);
+    throw new Error(`Telemetry API HTTP ${r.status}`);
   }
   return r.json() as Promise<T>;
 }

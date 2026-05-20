@@ -4,6 +4,7 @@ import { executeReport } from "@/lib/wialon/report";
 import { buildReportBundle } from "@/lib/simera/reportBundle";
 import type { ReportRow } from "@/lib/wialon/report";
 import { extractRegistration } from "@/lib/simera/parsers";
+import { projectSummaryRows } from "@/lib/simera/summaryReport";
 import {
   ecoCleanDetail,
   ecoOnlyDetail,
@@ -107,7 +108,7 @@ export async function POST(req: Request, ctx: Ctx) {
         rows: projectEcoDetailColumns(detailClean),
       });
       tables.push({
-        title: "Eco Driving Detail (Raw Wialon)",
+        title: "Eco Driving Detail (Raw)",
         rows: projectEcoDetailColumns(ecoRaw),
       });
     } else if (kind === "engine") {
@@ -115,7 +116,10 @@ export async function POST(req: Request, ctx: Ctx) {
     } else if (kind === "latest") {
       tables.push({ title: "Unit Latest Data", rows: apply(bundle.unitLatest) });
     } else if (kind === "summary") {
-      tables.push({ title: "Summary", rows: apply(bundle.summary) });
+      tables.push({
+        title: "Summary",
+        rows: projectSummaryRows(apply(bundle.summary)),
+      });
     }
 
     return NextResponse.json({

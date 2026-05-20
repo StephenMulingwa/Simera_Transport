@@ -35,10 +35,18 @@ CREATE TABLE IF NOT EXISTS incident_comments (
   vehicle_registration TEXT NOT NULL DEFAULT '',
   comment_text TEXT NOT NULL,
   incident_fingerprint TEXT NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  duration_text TEXT NOT NULL DEFAULT '',
+  duration_sec INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS incident_comments_created_at_idx ON incident_comments (created_at DESC);
+
+-- Backfill for existing installations
+ALTER TABLE incident_comments
+  ADD COLUMN IF NOT EXISTS duration_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE incident_comments
+  ADD COLUMN IF NOT EXISTS duration_sec INTEGER;
 
 CREATE TABLE IF NOT EXISTS driver_phone_directory (
   id SERIAL PRIMARY KEY,
@@ -51,3 +59,5 @@ INSERT INTO driver_phone_directory (phone_e164, display_label) VALUES
   ('+254111224952', NULL),
   ('+254107600036', NULL)
 ON CONFLICT (phone_e164) DO NOTHING;
+
+-- Super Admin (non-deletable) is enforced in app code by email: lib/auth/superAdmin.ts

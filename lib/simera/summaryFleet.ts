@@ -1,21 +1,66 @@
 import type { ReportRow } from "@/lib/wialon/report";
 import {
   extractRegistration,
+  googleMapsPlaceUrl,
   parseMaxSpeedKmh,
   parseReportDateTime,
   parseSpeedKmh,
+  rowLocationCell,
 } from "./parsers";
-import { matchRename, normGrouping, pickDf } from "./tables";
+import { matchRename, mergeMatchingTables, normGrouping, pickDf } from "./tables";
 
 const MAIN_PATTERN =
   /grouping|last|message|monitor|fleet|unit|online|connection|latest/i;
+/** When template table names differ (new resource / locale), widen matching. */
+const MAIN_PATTERN_FALLBACK =
+  /fleet|monitor|unit|online|connection|tracing|sensor|objects|listing|geozone|position/i;
 const EH_PATTERN = /engine|hour|idl|idle/i;
 const ECO_PATTERN = /eco/i;
+
+function largestGroupingLikeTable(dfs: Record<string, ReportRow[]>): ReportRow[] {
+  let best: ReportRow[] = [];
+  for (const rows of Object.values(dfs)) {
+    if (!rows?.length) continue;
+    const row0 = rows[0];
+    if (!row0) continue;
+    const keys = Object.keys(row0).map((k) => k.toLowerCase());
+    const hasGroup = keys.some((k) =>
+      /grouping|unit|object|vehicle|^name$|registration|plate/.test(k),
+    );
+    if (!hasGroup) continue;
+    if (rows.length > best.length) best = rows.map((r) => ({ ...r }));
+  }
+  return best;
+}
+
+function pickMainRowsForFleet(dfs: Record<string, ReportRow[]>): ReportRow[] {
+  try {
+    return pickDf(dfs, MAIN_PATTERN, "main").rows.map((r) => ({ ...r }));
+  } catch {
+    /* fall through */
+  }
+  const merged = mergeMatchingTables(dfs, MAIN_PATTERN);
+  if (merged.length) return merged;
+  const broad = mergeMatchingTables(dfs, MAIN_PATTERN_FALLBACK);
+  if (broad.length) return broad;
+  return largestGroupingLikeTable(dfs);
+}
+
+function pickEngineRowsForFleet(dfs: Record<string, ReportRow[]>): ReportRow[] {
+  try {
+    return pickDf(dfs, EH_PATTERN, "engine_hours").rows.map((r) => ({ ...r }));
+  } catch {
+    /* fall through */
+  }
+  return mergeMatchingTables(dfs, EH_PATTERN);
+}
 
 export type FleetSummaryRow = {
   vehicle: string;
   lastMessageTime: string | null;
   location: string | null;
+  /** "lat,lng" from Wialon when the location cell had coordinates */
+  locationCoords: string | null;
   locationUrl: string | null;
   speed: string | null;
   driver: string | null;
@@ -37,8 +82,7 @@ function firstCol<T extends ReportRow>(
 }
 
 export function buildSummaryFleet(dfs: Record<string, ReportRow[]>): FleetSummaryRow[] {
-  const mainPick = pickDf(dfs, MAIN_PATTERN, "main");
-  let mainRows = mainPick.rows;
+  let mainRows = pickMainRowsForFleet(dfs);
   mainRows = matchRename(mainRows, {
     Grouping: ["grouping", "unit", "name", "object", "vehicle"],
     "Last message time": [
@@ -60,8 +104,7 @@ export function buildSummaryFleet(dfs: Record<string, ReportRow[]>): FleetSummar
     }
   }
 
-  const ehPick = pickDf(dfs, EH_PATTERN, "engine_hours");
-  let ehRows = ehPick.rows;
+  let ehRows = pickEngineRowsForFleet(dfs);
 
   let idlingCol: string | null = null;
   for (const cand of ["Idling", "Engine idling", "Idling time", "Idle"]) {
@@ -95,11 +138,13 @@ export function buildSummaryFleet(dfs: Record<string, ReportRow[]>): FleetSummar
     if (!idlingByGroup.has(g)) idlingByGroup.set(g, idling);
   }
 
-  let ecoRows: ReportRow[] = [];
-  try {
-    ecoRows = pickDf(dfs, ECO_PATTERN, "eco").rows;
-  } catch {
-    ecoRows = [];
+  let ecoRows: ReportRow[] = mergeMatchingTables(dfs, ECO_PATTERN);
+  if (!ecoRows.length) {
+    try {
+      ecoRows = pickDf(dfs, ECO_PATTERN, "eco").rows.map((r) => ({ ...r }));
+    } catch {
+      ecoRows = [];
+    }
   }
 
   const violSumByGroup = new Map<string, number>();
@@ -130,11 +175,15 @@ export function buildSummaryFleet(dfs: Record<string, ReportRow[]>): FleetSummar
     const grouping = normGrouping(r.Grouping);
     if (!grouping) continue;
     const vehicle = extractRegistration(grouping) || grouping;
-    const locRaw = firstCol(r, ["Location", "location"]);
-    const location = locRaw != null ? String(locRaw).trim() : null;
+    const { text: location, coords: locationCoords } = rowLocationCell(r, [
+      "Location",
+      "location",
+    ]);
+    const locationNorm = location || null;
+    const locationCoordsNorm = locationCoords;
     const locationUrl =
-      location && location.length > 0
-        ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`
+      locationNorm && locationNorm.length > 0
+        ? googleMapsPlaceUrl(locationNorm, locationCoordsNorm)
         : null;
 
     const spdRaw = firstCol(r, ["Speed", "speed"]);
@@ -146,7 +195,8 @@ export function buildSummaryFleet(dfs: Record<string, ReportRow[]>): FleetSummar
         firstCol(r, ["Last message time", "last message time"]) != null
           ? String(firstCol(r, ["Last message time", "last message time"]))
           : null,
-      location,
+      location: locationNorm,
+      locationCoords: locationCoordsNorm,
       locationUrl,
       speed: spdRaw != null ? String(spdRaw) : null,
       driver: driverRaw != null ? String(driverRaw) : null,

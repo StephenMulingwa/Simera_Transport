@@ -15,6 +15,8 @@ export type FleetRow = {
   vehicle: string;
   lastMessageTime: string | null;
   location: string | null;
+  /** Present on fresh API payloads; may be absent on older sessionStorage cache. */
+  locationCoords?: string | null;
   locationUrl: string | null;
   speed: string | null;
   driver: string | null;
@@ -44,10 +46,15 @@ export type Incident = {
   phone: string;
   violationTime: string | null;
   violationTimeIso: string | null;
+  durationText: string;
+  durationSec: number | null;
   locationInitial: string | null;
   locationInitialUrl: string | null;
   locationFinal: string | null;
   locationFinalUrl: string | null;
+  /** Overspeeding events: speed from the eco report row */
+  speedKmh?: number | null;
+  speedDisplay?: string | null;
 };
 
 export type DriverPayload = {
@@ -71,10 +78,15 @@ export const REFRESH_PERIOD_SEC = 300;
  *  than 5 minutes is discarded so we never show stale numbers as "live". */
 const SESSION_TTL_MS = 5 * 60 * 1000;
 
+/** Bumped when the cached payload shape changes so old shapes never linger. */
+const CACHE_PREFIX = "simera3:";
+
 function readCache<T>(key: string): { payload: T; at: number } | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(`simera:${key}`);
+    // Drop any payload written by an earlier shape.
+    window.sessionStorage.removeItem(`simera:${key}`);
+    const raw = window.sessionStorage.getItem(`${CACHE_PREFIX}${key}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { at?: number; payload?: T };
     if (
@@ -82,7 +94,7 @@ function readCache<T>(key: string): { payload: T; at: number } | null {
       Date.now() - parsed.at > SESSION_TTL_MS ||
       parsed.payload == null
     ) {
-      window.sessionStorage.removeItem(`simera:${key}`);
+      window.sessionStorage.removeItem(`${CACHE_PREFIX}${key}`);
       return null;
     }
     return { payload: parsed.payload, at: parsed.at };
@@ -167,7 +179,7 @@ export function SimeraDataProvider({
       try {
         if (typeof window === "undefined") return;
         window.sessionStorage.setItem(
-          `simera:${key}`,
+          `${CACHE_PREFIX}${key}`,
           JSON.stringify({ at: Date.now(), payload }),
         );
       } catch {
@@ -243,7 +255,7 @@ export function SimeraDataProvider({
     })();
 
     // Mark firstLoadDone as soon as ANY task finishes so the slowest
-    // section (often Wialon reports) doesn't gate the others.
+    // section (often heavy report calls) doesn't gate the others.
     void Promise.race([fleetTask, driverTask, mapTask]).then(() => {
       setFirstLoadDone(true);
       setLastUpdatedAt(Date.now());

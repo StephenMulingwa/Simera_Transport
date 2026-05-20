@@ -11,6 +11,8 @@ const schema = z.object({
   locationText: z.string(),
   vehicleRegistration: z.string().min(1),
   commentText: z.string().min(1),
+  durationText: z.string().optional(),
+  durationSec: z.number().int().nonnegative().nullable().optional(),
 });
 
 export async function POST(req: Request) {
@@ -40,6 +42,8 @@ export async function POST(req: Request) {
       location_text: v.locationText,
       vehicle_registration: v.vehicleRegistration,
       comment_text: v.commentText,
+      duration_text: v.durationText ?? "",
+      duration_sec: v.durationSec ?? null,
     });
 
     return NextResponse.json({ ok: true, id: row.id });

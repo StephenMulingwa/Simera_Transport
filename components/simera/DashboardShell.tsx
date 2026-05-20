@@ -6,43 +6,53 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Bus,
+  ClipboardCheck,
   FileBarChart2,
   LogOut,
   Map as MapIcon,
   Radio,
   RefreshCw,
-  UserRoundCog,
+  Shield,
 } from "lucide-react";
 import {
   formatCountdown,
   useSimeraData,
 } from "@/lib/contexts/SimeraDataContext";
+import { formatEatWallDateTime, formatAppTimeOnly } from "@/lib/simera/appTime";
 
-const TABS = [
-  { id: "fleet" as const, href: "/", label: "Fleet Monitor", icon: Bus },
+type TabId = "fleet" | "driver" | "evaluation" | "map" | "reports" | "admin";
+
+type TabSpec = {
+  id: TabId;
+  href: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  /** When true the tab only renders for admin users. */
+  adminOnly?: boolean;
+};
+
+const TABS: TabSpec[] = [
+  { id: "fleet", href: "/", label: "Fleet Monitor", icon: Bus },
+  { id: "driver", href: "/driver", label: "Driver Monitoring", icon: Radio },
   {
-    id: "driver" as const,
-    href: "/driver",
-    label: "Driver Monitoring",
-    icon: Radio,
+    id: "evaluation",
+    href: "/evaluation",
+    label: "Vehicle Evaluation",
+    icon: ClipboardCheck,
   },
-  { id: "map" as const, href: "/map", label: "Map View", icon: MapIcon },
-  {
-    id: "reports" as const,
-    href: "/reports",
-    label: "Reports",
-    icon: FileBarChart2,
-  },
+  { id: "map", href: "/map", label: "Map View", icon: MapIcon },
+  { id: "reports", href: "/reports", label: "Reports", icon: FileBarChart2 },
+  { id: "admin", href: "/admin", label: "Admin", icon: Shield, adminOnly: true },
 ];
 
 type Me = { id: string; email: string; name: string; role: string };
 
-type TabId = "fleet" | "driver" | "map" | "reports";
-
 function tabFromPath(pathname: string | null): TabId {
   if (!pathname) return "fleet";
+  if (pathname.startsWith("/admin")) return "admin";
   if (pathname.startsWith("/reports")) return "reports";
   if (pathname === "/driver") return "driver";
+  if (pathname.startsWith("/evaluation")) return "evaluation";
   if (pathname === "/map") return "map";
   return "fleet";
 }
@@ -75,17 +85,7 @@ export function DashboardShell({
 
   useEffect(() => {
     const tick = () => {
-      setClock(
-        new Date().toLocaleString("en-GB", {
-          timeZone: "Africa/Nairobi",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }),
-      );
+      setClock(formatEatWallDateTime(Date.now()));
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -98,6 +98,9 @@ export function DashboardShell({
       sessionStorage.removeItem("simera:fleet");
       sessionStorage.removeItem("simera:driver");
       sessionStorage.removeItem("simera:map");
+      sessionStorage.removeItem("simera2:fleet");
+      sessionStorage.removeItem("simera2:driver");
+      sessionStorage.removeItem("simera2:map");
     } catch {
       /* ignore */
     }
@@ -147,7 +150,7 @@ export function DashboardShell({
             className="flex items-center gap-2 rounded-full border border-white/40 bg-emerald-500/90 px-3 py-1 text-xs font-bold uppercase tracking-wider text-white shadow-sm"
             title={
               lastUpdatedAt
-                ? `Updated ${new Date(lastUpdatedAt).toLocaleTimeString()}`
+                ? `Updated ${formatAppTimeOnly(lastUpdatedAt)}`
                 : "Live"
             }
           >
@@ -185,15 +188,6 @@ export function DashboardShell({
               {me.name}
             </span>
           )}
-          {me?.role === "admin" && (
-            <Link
-              href="/admin"
-              className="inline-flex items-center gap-1 rounded-md border border-white/40 bg-white/15 px-2.5 py-1 text-xs font-semibold text-white hover:bg-white/25"
-            >
-              <UserRoundCog className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Admin</span>
-            </Link>
-          )}
           <button
             type="button"
             onClick={() => void logout()}
@@ -219,43 +213,45 @@ export function DashboardShell({
           }}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-hidden px-0 pb-2">
-            {TABS.map(({ id, href, label, icon: Icon }) => {
-              const isActive = activeTab === id;
-              return (
-                <Link
-                  key={id}
-                  href={href}
-                  prefetch
-                  className="mx-2 flex items-center gap-3 rounded-md px-3 py-2.5 text-left transition"
-                  style={{
-                    background: isActive
-                      ? "rgba(255,255,255,0.18)"
-                      : "transparent",
-                    border: isActive
-                      ? "1px solid rgba(253, 224, 71, 0.95)"
-                      : "1px solid transparent",
-                  }}
-                >
-                  <Icon
-                    className={`h-[18px] w-[18px] shrink-0 ${
-                      isActive ? "text-yellow-300" : "text-white/95"
-                    }`}
-                  />
-                  <span
-                    className={`whitespace-nowrap text-sm font-bold transition-all duration-200 ${
-                      isActive ? "text-yellow-300" : "text-white/95"
-                    }`}
+            {TABS.filter((t) => !t.adminOnly || me?.role === "admin").map(
+              ({ id, href, label, icon: Icon }) => {
+                const isActive = activeTab === id;
+                return (
+                  <Link
+                    key={id}
+                    href={href}
+                    prefetch
+                    className="mx-2 flex items-center gap-3 rounded-md px-3 py-2.5 text-left transition"
                     style={{
-                      opacity: hover ? 1 : 0,
-                      width: hover ? "auto" : 0,
-                      overflow: "hidden",
+                      background: isActive
+                        ? "rgba(255,255,255,0.18)"
+                        : "transparent",
+                      border: isActive
+                        ? "1px solid rgba(253, 224, 71, 0.95)"
+                        : "1px solid transparent",
                     }}
                   >
-                    {label}
-                  </span>
-                </Link>
-              );
-            })}
+                    <Icon
+                      className={`h-[18px] w-[18px] shrink-0 ${
+                        isActive ? "text-yellow-300" : "text-white/95"
+                      }`}
+                    />
+                    <span
+                      className={`whitespace-nowrap text-sm font-bold transition-all duration-200 ${
+                        isActive ? "text-yellow-300" : "text-white/95"
+                      }`}
+                      style={{
+                        opacity: hover ? 1 : 0,
+                        width: hover ? "auto" : 0,
+                        overflow: "hidden",
+                      }}
+                    >
+                      {label}
+                    </span>
+                  </Link>
+                );
+              },
+            )}
           </div>
 
           <div className="mt-auto shrink-0 border-t border-white/30 px-3 pb-2 pt-3">
@@ -286,21 +282,23 @@ export function DashboardShell({
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50">
           <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-200 bg-white px-2 py-1.5 md:hidden">
-            {TABS.map(({ id, href, label, icon: Icon }) => (
-              <Link
-                key={id}
-                href={href}
-                prefetch
-                className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-xs font-semibold transition ${
-                  activeTab === id
-                    ? "bg-red-600 text-white shadow-sm"
-                    : "text-zinc-800 hover:bg-red-50 hover:text-red-700"
-                }`}
-              >
-                <Icon className="h-4 w-4" />
-                {label}
-              </Link>
-            ))}
+            {TABS.filter((t) => !t.adminOnly || me?.role === "admin").map(
+              ({ id, href, label, icon: Icon }) => (
+                <Link
+                  key={id}
+                  href={href}
+                  prefetch
+                  className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-xs font-semibold transition ${
+                    activeTab === id
+                      ? "bg-red-600 text-white shadow-sm"
+                      : "text-zinc-800 hover:bg-red-50 hover:text-red-700"
+                  }`}
+                >
+                  <Icon className="h-4 w-4" />
+                  {label}
+                </Link>
+              ),
+            )}
           </nav>
 
           <main className="simera-main-scroll flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-auto overscroll-y-contain px-3 py-4 md:px-6 md:py-6">

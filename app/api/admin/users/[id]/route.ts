@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession } from "@/lib/auth/session";
-import { deleteUser, setUserActive } from "@/lib/db/users";
+import { userIsNonDeletableSuperAdmin } from "@/lib/auth/superAdmin";
+import { deleteUser, findUserById, setUserActive } from "@/lib/db/users";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -24,6 +25,16 @@ export async function PATCH(req: Request, ctx: Ctx) {
     if (!parsed.success || parsed.data.active === undefined) {
       return NextResponse.json({ error: "Invalid body" }, { status: 400 });
     }
+    const target = await findUserById(id);
+    if (!target) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    if (parsed.data.active === false && userIsNonDeletableSuperAdmin(target)) {
+      return NextResponse.json(
+        { error: "This Super Admin account cannot be deactivated" },
+        { status: 400 },
+      );
+    }
     await setUserActive(id, parsed.data.active);
     return NextResponse.json({ ok: true });
   } catch (e) {
@@ -42,7 +53,23 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     return NextResponse.json({ error: "Cannot delete yourself" }, { status: 400 });
   }
   try {
-    await deleteUser(id);
+    const target = await findUserById(id);
+    if (!target) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    if (userIsNonDeletableSuperAdmin(target)) {
+      return NextResponse.json(
+        { error: "This Super Admin account cannot be deleted" },
+        { status: 400 },
+      );
+    }
+    const { deleted } = await deleteUser(id);
+    if (!deleted) {
+      return NextResponse.json(
+        { error: "This account cannot be deleted" },
+        { status: 400 },
+      );
+    }
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error(e);

@@ -61,6 +61,12 @@ export function matchRename<T extends ReportRow>(df: T[], targets: RenameSpec): 
         out[to] = out[from]!;
         delete out[from];
       }
+      const fromCoords = `${from}_coords`;
+      const toCoords = `${to}_coords`;
+      if (fromCoords in out && !(toCoords in out)) {
+        out[toCoords] = out[fromCoords]!;
+        delete out[fromCoords];
+      }
     }
     return out as T;
   });

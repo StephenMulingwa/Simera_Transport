@@ -1,0 +1,4 @@
+# Do not send local secrets to Vercel (use Dashboard → Environment Variables).
+.env
+.env.*
+!.env.example
